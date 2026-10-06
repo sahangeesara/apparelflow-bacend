@@ -1,21 +1,22 @@
 import express, { type NextFunction, type Request, type Response } from 'express';
-import type { DB } from './db.ts';
 import * as svc from './service.ts';
 import { HttpError } from './service.ts';
 import type { User } from './types.ts';
 
 type Authed = Request & { user: User | null };
 const ALL = ['cutting_supervisor', 'cutting_verifier', 'sewing_supervisor'] as const;
+const sessionToken = (cookie = '') => /(?:^|;\s*)sid=([^;]+)/.exec(cookie)?.[1];
 
-export function createApp(db: DB) {
+export function createApp() {
   const app = express();
   app.use(express.json({ limit: '10kb' }));
 
   // Identity comes ONLY from the HttpOnly session cookie, never from the request body.
   app.use((req, _res, next) => {
-    const m = /(?:^|;\s*)sid=([a-f0-9]+)/.exec(req.headers.cookie || '');
-    (req as Authed).user = svc.userFromToken(db, m?.[1]);
-    next();
+    svc.userFromToken(sessionToken(req.headers.cookie)).then(user => {
+      (req as Authed).user = user;
+      next();
+    }).catch(next);
   });
   const user = (req: Request) => (req as Authed).user;
   const route = (fn: (req: Request, res: Response) => unknown | Promise<unknown>, status = 200) =>
@@ -23,35 +24,43 @@ export function createApp(db: DB) {
       try { Promise.resolve(fn(req, res)).then(body => res.status(status).json(body)).catch(next); } catch (e) { next(e); }
     };
   const id = (req: Request) => Number(req.params.id);
+  const table = (req: Request) => typeof req.params.table === 'string' ? req.params.table : '';
 
   // ---- auth
-  app.post('/api/login', route((req, res) => {
-    return svc.login(db, req.body).then(({ token, user }) => {
+  app.post('/api/login', route(async (req, res) => {
+    const { token, user } = await svc.login(req.body);
       res.cookie('sid', token, { httpOnly: true, sameSite: 'strict', path: '/', maxAge: 8 * 3600e3, secure: process.env.NODE_ENV === 'production' });
       return { user };
-    });
   }));
-  app.post('/api/signup', route((req, res) => svc.signup(db, req.body), 201));
+  app.post('/api/signup', route((req, res) => svc.signup(req.body), 201));
   app.post('/api/logout', route((req, res) => {
-    svc.logout(db, /sid=([a-f0-9]+)/.exec(req.headers.cookie || '')?.[1]);
-    res.clearCookie('sid', { path: '/' });
-    return { ok: true };
+    return svc.logout(sessionToken(req.headers.cookie)).then(() => {
+      res.clearCookie('sid', { path: '/' });
+      return { ok: true };
+    });
   }));
   app.get('/api/me', route(req => ({ user: svc.requireRole(user(req), ...ALL) })));
 
+  // ---- supervisor admin CRUD
+  app.get('/api/admin/tables', route(async req => { svc.requireRole(user(req), 'cutting_supervisor'); return { tables: await svc.listAdminTables() }; }));
+  app.get('/api/admin/:table', route(async req => { svc.requireRole(user(req), 'cutting_supervisor'); return svc.listAdminRows(table(req)); }));
+  app.post('/api/admin/:table', route(async (req) => { svc.requireRole(user(req), 'cutting_supervisor'); return svc.createAdminRow(table(req), req.body); }, 201));
+  app.patch('/api/admin/:table/:key', route(async req => { svc.requireRole(user(req), 'cutting_supervisor'); return svc.updateAdminRow(table(req), String(req.params.key), req.body); }));
+  app.delete('/api/admin/:table/:key', route(async req => { svc.requireRole(user(req), 'cutting_supervisor'); return svc.deleteAdminRow(table(req), String(req.params.key)); }));
+
   // ---- cutting supervisor / verifier
-  app.get('/api/recipes', route(req => ({ recipes: svc.listRecipes(db, user(req)) })));
-  app.get('/api/orders', route(req => ({ orders: svc.listOrders(db, user(req)) })));
-  app.post('/api/orders', route(req => ({ order: svc.createOrder(db, user(req), req.body) }), 201));
-  app.get('/api/orders/:id', route(req => ({ order: svc.getOrderFor(db, user(req), id(req)) })));
-  app.post('/api/orders/:id/resubmit', route(req => ({ order: svc.resubmit(db, user(req), id(req)) })));
-  app.post('/api/orders/:id/counts', route(req => ({ order: svc.saveCounts(db, user(req), id(req), req.body) })));
-  app.post('/api/orders/:id/approve', route(req => ({ order: svc.approve(db, user(req), id(req)) })));
-  app.post('/api/orders/:id/reject', route(req => ({ order: svc.reject(db, user(req), id(req), req.body) })));
+  app.get('/api/recipes', route(async req => ({ recipes: await svc.listRecipes(user(req)) })));
+  app.get('/api/orders', route(async req => ({ orders: await svc.listOrders(user(req)) })));
+  app.post('/api/orders', route(async req => ({ order: await svc.createOrder(user(req), req.body) }), 201));
+  app.get('/api/orders/:id', route(async req => ({ order: await svc.getOrderFor(user(req), id(req)) })));
+  app.post('/api/orders/:id/resubmit', route(async req => ({ order: await svc.resubmit(user(req), id(req)) })));
+  app.post('/api/orders/:id/counts', route(async req => ({ order: await svc.saveCounts(user(req), id(req), req.body) })));
+  app.post('/api/orders/:id/approve', route(async req => ({ order: await svc.approve(user(req), id(req)) })));
+  app.post('/api/orders/:id/reject', route(async req => ({ order: await svc.reject(user(req), id(req), req.body) })));
 
   // ---- sewing (queue query is hard-coded to status='VERIFIED' inside the service)
-  app.get('/api/sewing/queue', route(req => ({ orders: svc.sewingQueue(db, user(req)) })));
-  app.post('/api/sewing/:id/start', route(req => ({ order: svc.startSewing(db, user(req), id(req)) })));
+  app.get('/api/sewing/queue', route(async req => ({ orders: await svc.sewingQueue(user(req)) })));
+  app.post('/api/sewing/:id/start', route(async req => ({ order: await svc.startSewing(user(req), id(req)) })));
 
   app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found' }));
   app.use((err: Error & { type?: string }, _req: Request, res: Response, _next: NextFunction) => {

@@ -1,6 +1,6 @@
 export type Role = 'cutting_supervisor' | 'cutting_verifier' | 'sewing_supervisor';
 export type Flag = 'GREEN' | 'YELLOW' | 'RED';
-export interface User { id: number; email: string; role: Role; full_name: string }
+export interface User { id: string; email: string; role: Role; full_name: string }
 export interface Recipe { id: number; recipe_code: string; name: string; std_fabric_yards: number; wastage_cap: number; components: { id: number; component_name: string; pieces_per_garment: number }[] }
 export interface Component { component_id: number; component_name: string; pieces_per_garment: number; expected_qty: number; actual_qty: number | null; status: Flag | null }
 export interface Log { decision: 'APPROVED' | 'REJECTED'; rejection_note: string | null; wastage_pct: number; timestamp: string; verifier_name: string }

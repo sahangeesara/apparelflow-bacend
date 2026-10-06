@@ -13,8 +13,6 @@
   "license": "ISC",
   "dependencies": {
     "@supabase/supabase-js": "^2.117.2",
-    "@types/better-sqlite3": "^9.6.0",
-    "better-sqlite3": "^13.0.3",
     "dotenv": "^18.0.5",
     "express": "^5.2.1"
   },

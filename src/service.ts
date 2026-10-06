@@ -1,199 +1,127 @@
-// All business rules live here (framework-free) so route handlers stay thin and tests can call them directly.
-import crypto from 'crypto';
-import { type DB, supabase } from './db.ts';
-import type { Flag, Order, Recipe, Role, User } from './types.ts';
+import { supabase } from './db.ts';
+import type { Component, Flag, Log, Order, Recipe, Role, User } from './types.ts';
 
 export class HttpError extends Error {
   constructor(public status: number, message: string, public extra: Record<string, unknown> = {}) { super(message); }
 }
 type Body = Record<string, unknown> | null | undefined;
-const flag = (a: number, e: number): Flag => (a === e ? 'GREEN' : a > e ? 'YELLOW' : 'RED');
+const flag = (actual: number, expected: number): Flag => actual === expected ? 'GREEN' : actual > expected ? 'YELLOW' : 'RED';
+const fail = (error: { message: string } | null, status = 400) => { if (error) throw new HttpError(status, `Supabase: ${error.message}`); };
+const table = (name: string) => supabase.from(name);
 
-export function requireRole(u: User | null, ...roles: Role[]): User {
-  if (!u) throw new HttpError(401, 'Not authenticated');
-  if (!roles.includes(u.role)) throw new HttpError(403, `Forbidden for role ${u.role}`);
-  return u;
+export const ADMIN_TABLES = ['cutting_orders', 'profiles', 'recipe_components', 'recipes', 'sessions', 'verification_items', 'verification_logs'] as const;
+type AdminTable = typeof ADMIN_TABLES[number];
+type AdminColumn = { name: string; type: string; pk: number; notnull: number; dflt_value: unknown };
+const GENERATED_ID_TABLES = new Set<AdminTable>([
+  'recipes',
+  'recipe_components',
+  'cutting_orders',
+  'verification_items',
+  'verification_logs',
+]);
+const schemas: Record<AdminTable, AdminColumn[]> = {
+  recipes: [{ name: 'id', type: 'bigint', pk: 1, notnull: 1, dflt_value: 'GENERATED ALWAYS AS IDENTITY' }, { name: 'recipe_code', type: 'text', pk: 0, notnull: 1, dflt_value: null }, { name: 'name', type: 'text', pk: 0, notnull: 1, dflt_value: null }, { name: 'category', type: 'text', pk: 0, notnull: 1, dflt_value: null }, { name: 'std_fabric_yards', type: 'numeric', pk: 0, notnull: 1, dflt_value: null }, { name: 'wastage_cap', type: 'numeric', pk: 0, notnull: 1, dflt_value: null }],
+  profiles: [{ name: 'id', type: 'uuid', pk: 1, notnull: 1, dflt_value: null }, { name: 'full_name', type: 'text', pk: 0, notnull: 1, dflt_value: null }, { name: 'role', type: 'text', pk: 0, notnull: 1, dflt_value: null }],
+  recipe_components: [{ name: 'id', type: 'bigint', pk: 1, notnull: 1, dflt_value: 'GENERATED ALWAYS AS IDENTITY' }, { name: 'recipe_id', type: 'bigint', pk: 0, notnull: 1, dflt_value: null }, { name: 'component_name', type: 'text', pk: 0, notnull: 1, dflt_value: null }, { name: 'pieces_per_garment', type: 'int', pk: 0, notnull: 1, dflt_value: null }, { name: 'image_url', type: 'text', pk: 0, notnull: 0, dflt_value: null }],
+  cutting_orders: [{ name: 'id', type: 'bigint', pk: 1, notnull: 1, dflt_value: 'GENERATED ALWAYS AS IDENTITY' }, { name: 'order_no', type: 'text', pk: 0, notnull: 0, dflt_value: null }, { name: 'recipe_id', type: 'bigint', pk: 0, notnull: 1, dflt_value: null }, { name: 'target_qty', type: 'int', pk: 0, notnull: 1, dflt_value: null }, { name: 'fabric_roll_id', type: 'text', pk: 0, notnull: 1, dflt_value: null }, { name: 'actual_fabric_yds', type: 'numeric', pk: 0, notnull: 1, dflt_value: null }, { name: 'status', type: 'text', pk: 0, notnull: 1, dflt_value: "'PENDING_VERIFICATION'" }, { name: 'created_by', type: 'uuid', pk: 0, notnull: 1, dflt_value: null }, { name: 'sewing_started_at', type: 'timestamptz', pk: 0, notnull: 0, dflt_value: null }, { name: 'sewing_started_by', type: 'uuid', pk: 0, notnull: 0, dflt_value: null }, { name: 'created_at', type: 'timestamptz', pk: 0, notnull: 1, dflt_value: 'now()' }, { name: 'updated_at', type: 'timestamptz', pk: 0, notnull: 1, dflt_value: 'now()' }],
+  sessions: [{ name: 'token', type: 'text', pk: 1, notnull: 1, dflt_value: null }, { name: 'user_id', type: 'uuid', pk: 0, notnull: 1, dflt_value: null }, { name: 'expires_at', type: 'bigint', pk: 0, notnull: 1, dflt_value: null }],
+  verification_items: [{ name: 'id', type: 'bigint', pk: 1, notnull: 1, dflt_value: 'GENERATED ALWAYS AS IDENTITY' }, { name: 'order_id', type: 'bigint', pk: 0, notnull: 1, dflt_value: null }, { name: 'component_id', type: 'bigint', pk: 0, notnull: 1, dflt_value: null }, { name: 'expected_qty', type: 'int', pk: 0, notnull: 1, dflt_value: null }, { name: 'actual_qty', type: 'int', pk: 0, notnull: 1, dflt_value: null }, { name: 'status', type: 'text', pk: 0, notnull: 1, dflt_value: null }],
+  verification_logs: [{ name: 'id', type: 'bigint', pk: 1, notnull: 1, dflt_value: 'GENERATED ALWAYS AS IDENTITY' }, { name: 'order_id', type: 'bigint', pk: 0, notnull: 1, dflt_value: null }, { name: 'verifier_id', type: 'uuid', pk: 0, notnull: 1, dflt_value: null }, { name: 'decision', type: 'text', pk: 0, notnull: 1, dflt_value: null }, { name: 'rejection_note', type: 'text', pk: 0, notnull: 0, dflt_value: null }, { name: 'wastage_pct', type: 'numeric', pk: 0, notnull: 0, dflt_value: null }, { name: 'variances', type: 'jsonb', pk: 0, notnull: 0, dflt_value: null }, { name: 'timestamp', type: 'timestamptz', pk: 0, notnull: 1, dflt_value: 'now()' }],
+};
+function definition(name: string) { if (!ADMIN_TABLES.includes(name as AdminTable)) throw new HttpError(400, 'Unsupported admin table'); return { name: name as AdminTable, columns: schemas[name as AdminTable] }; }
+function keyValues(key: string, keys: AdminColumn[]) { try { const parsed = JSON.parse(key) as Record<string, unknown>; if (keys.every(k => parsed[k.name] !== undefined)) return parsed; } catch { /* single key fallback */ } if (keys.length === 1) return { [keys[0].name]: key }; throw new HttpError(400, `Composite key required: ${keys.map(k => k.name).join(', ')}`); }
+
+export function requireRole(user: User | null, ...roles: Role[]) { if (!user) throw new HttpError(401, 'Not authenticated'); if (!roles.includes(user.role)) throw new HttpError(403, `Forbidden for role ${user.role}`); return user; }
+const validRole = (value: unknown): value is Role => value === 'cutting_supervisor' || value === 'cutting_verifier' || value === 'sewing_supervisor';
+async function profileForAuthUser(authUser: { id: string; email?: string; user_metadata?: Record<string, unknown>; app_metadata?: Record<string, unknown> }) {
+  const { data: profile, error: profileError } = await table('profiles').select('id,full_name,role').eq('id', authUser.id).maybeSingle();
+  fail(profileError);
+  if (profile) return { id: profile.id, email: authUser.email ?? '', full_name: profile.full_name, role: profile.role as Role };
+
+  const metadata = { ...(authUser.app_metadata ?? {}), ...(authUser.user_metadata ?? {}) };
+  const email = authUser.email?.toLowerCase() ?? '';
+  const demoRole: Role | undefined = email.startsWith('supervisor@') ? 'cutting_supervisor'
+    : email.startsWith('verifier@') ? 'cutting_verifier'
+      : email.startsWith('sewing@') ? 'sewing_supervisor' : undefined;
+  const role = validRole(metadata.role) ? metadata.role : demoRole;
+  const fullName = typeof metadata.full_name === 'string'
+    ? metadata.full_name.trim()
+    : typeof metadata.name === 'string' ? metadata.name.trim()
+      : demoRole ? (demoRole === 'cutting_supervisor' ? 'Cutting Supervisor' : demoRole === 'cutting_verifier' ? 'Cutting Verifier' : 'Sewing Supervisor') : '';
+  if (!validRole(role) || fullName.length < 2) {
+    throw new HttpError(403, 'Account profile is not configured. Add role and full_name metadata to this Supabase Auth user, or sign up again.');
+  }
+  const virtualProfile = { id: authUser.id, email: authUser.email ?? '', full_name: fullName, role };
+  const { data: created, error: createError } = await table('profiles')
+    .upsert({ id: authUser.id, full_name: fullName, role }, { onConflict: 'id' })
+    .select('id,full_name,role')
+    .single();
+  if (createError?.message.toLowerCase().includes('row-level security')) return virtualProfile;
+  fail(createError);
+  if (!created) throw new HttpError(403, 'Account profile is not configured');
+  return { id: created.id, email: authUser.email ?? '', full_name: created.full_name, role: created.role as Role };
 }
-export function userFromToken(db: DB, token?: string): User | null {
-  if (!token || !/^[a-f0-9]+$/.test(token)) return null;
-  return (db.prepare('SELECT u.id,u.email,u.role,u.full_name FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND s.expires_at>?').get(token, Date.now()) as User) ?? null;
+export async function userFromToken(token?: string): Promise<User | null> {
+  if (!token) return null;
+  const { data: authUser, error: authError } = await supabase.auth.getUser(token);
+  if (authError || !authUser.user) return null;
+  return profileForAuthUser(authUser.user);
 }
-export async function login(db: DB, body: Body) {
+export async function login(body: Body) {
   const { email, password } = body ?? {};
-  if (typeof email !== 'string' || typeof password !== 'string') {
-    throw new HttpError(401, 'Invalid email or password');
-  }
-  const normalizedEmail = email.trim().toLowerCase();
-  const { error } = await supabase.auth.signInWithPassword({ email: normalizedEmail, password });
-  if (error) throw new HttpError(401, 'Invalid email or password');
-
-  const u = db.prepare('SELECT id,email,role,full_name FROM users WHERE email=?')
-    .get(normalizedEmail) as User | undefined;
-  if (!u) {
-    throw new HttpError(403, 'Account profile is not configured');
-  }
-  const token = crypto.randomBytes(32).toString('hex');
-  db.prepare('INSERT INTO sessions VALUES(?,?,?)').run(token, u.id, Date.now() + 8 * 3600e3);
-  return { token, user: u };
+  if (typeof email !== 'string' || typeof password !== 'string') throw new HttpError(401, 'Invalid email or password');
+  const { data, error } = await supabase.auth.signInWithPassword({ email: email.trim().toLowerCase(), password });
+  if (error || !data.user) throw new HttpError(401, 'Invalid email or password');
+  const profile = await profileForAuthUser(data.user);
+  const token = data.session?.access_token;
+  if (!token) throw new HttpError(401, 'Supabase did not return an access token');
+  return { token, user: { id: profile.id, email: data.user.email ?? '', full_name: profile.full_name, role: profile.role as Role } };
 }
-
-export async function signup(db: DB, body: Body) {
+export async function signup(body: Body) {
   const { email, password, full_name, role } = body ?? {};
   const roles: Role[] = ['cutting_supervisor', 'cutting_verifier', 'sewing_supervisor'];
-  if (typeof email !== 'string' || typeof password !== 'string' || typeof full_name !== 'string' ||
-      !roles.includes(role as Role) || password.length < 8 || full_name.trim().length < 2) {
-    throw new HttpError(400, 'email, password (min 8 characters), full_name and a valid role are required');
-  }
-
-  const normalizedEmail = email.trim().toLowerCase();
-  const existing = db.prepare('SELECT id FROM users WHERE email=?').get(normalizedEmail);
-  if (existing) throw new HttpError(409, 'An account with this email already exists');
-
-  const { data, error } = await supabase.auth.admin.createUser({
-    email: normalizedEmail,
-    password,
-    email_confirm: true,
-  });
-  if (error || !data.user) {
-    if (error?.message.toLowerCase().includes('already')) throw new HttpError(409, 'An account with this email already exists');
-    throw new HttpError(400, error?.message ?? 'Unable to create account');
-  }
-
-  try {
-    const result = db.prepare(
-      'INSERT INTO users(email,password_hash,role,full_name) VALUES(?,?,?,?)',
-    ).run(normalizedEmail, 'managed-by-supabase-auth', role, full_name.trim());
-    const user = db.prepare('SELECT id,email,role,full_name FROM users WHERE id=?').get(result.lastInsertRowid) as User;
-    return { user };
-  } catch (error) {
+  if (typeof email !== 'string' || typeof password !== 'string' || typeof full_name !== 'string' || !roles.includes(role as Role) || password.length < 8 || full_name.trim().length < 2) throw new HttpError(400, 'email, password (min 8 characters), full_name and a valid role are required');
+  const { data, error } = await supabase.auth.admin.createUser({ email: email.trim().toLowerCase(), password, email_confirm: true });
+  if (error || !data.user) throw new HttpError(error?.message.toLowerCase().includes('already') ? 409 : 400, error?.message ?? 'Unable to create account');
+  const { error: profileError } = await table('profiles').insert({ id: data.user.id, full_name: full_name.trim(), role });
+  if (profileError?.message.toLowerCase().includes('row-level security')) {
+    const { error: metadataError } = await supabase.auth.admin.updateUserById(data.user.id, { user_metadata: { full_name: full_name.trim(), role } });
+    fail(metadataError);
+  } else if (profileError) {
     await supabase.auth.admin.deleteUser(data.user.id);
-    if (error instanceof Error && error.message.includes('UNIQUE')) {
-      throw new HttpError(409, 'An account with this email already exists');
-    }
-    throw error;
+    fail(profileError);
   }
+  return { user: { id: data.user.id, email: data.user.email ?? '', full_name: full_name.trim(), role: role as Role } };
 }
-export const logout = (db: DB, token?: string) => { if (token) db.prepare('DELETE FROM sessions WHERE token=?').run(token); };
+export async function logout(_token?: string) { return; }
 
-export function getOrder(db: DB, id: number): Order | null {
-  const o = db.prepare(`SELECT o.*,r.name recipe_name,r.recipe_code,r.std_fabric_yards,r.wastage_cap,u.full_name created_by_name
-    FROM cutting_orders o JOIN recipes r ON r.id=o.recipe_id JOIN users u ON u.id=o.created_by WHERE o.id=?`).get(id) as Order | undefined;
-  if (!o) return null;
-  o.expected_fabric = +(o.target_qty * o.std_fabric_yards).toFixed(2);
-  o.components = (db.prepare(`SELECT c.id component_id,c.component_name,c.pieces_per_garment,c.pieces_per_garment*? expected_qty,i.actual_qty
-    FROM recipe_components c LEFT JOIN verification_items i ON i.component_id=c.id AND i.order_id=? WHERE c.recipe_id=? ORDER BY c.id`).all(o.target_qty, id, o.recipe_id) as Order['components'])
-    .map(c => ({ ...c, status: c.actual_qty == null ? null : flag(c.actual_qty, c.expected_qty) }));
-  o.last_log = (db.prepare(`SELECT l.decision,l.rejection_note,l.wastage_pct,l.timestamp,u.full_name verifier_name FROM verification_logs l JOIN users u ON u.id=l.verifier_id WHERE order_id=? ORDER BY l.id DESC LIMIT 1`).get(id) as Order['last_log']) ?? null;
-  return o;
+export async function listAdminTables() { return Promise.all(ADMIN_TABLES.map(async name => { const { error } = await table(name).select('*', { head: true, count: 'exact' }); return { name, available: !error, columns: schemas[name] }; })); }
+export async function listAdminRows(name: string) { const d = definition(name); const { data, error } = await table(d.name).select('*').limit(500); fail(error); return { ...d, rows: data ?? [] }; }
+export async function createAdminRow(name: string, body: Body) { const d = definition(name); const values = Object.fromEntries(Object.entries(body ?? {}).filter(([key, value]) => d.columns.some(c => c.name === key) && !(key === 'id' && GENERATED_ID_TABLES.has(d.name)) && value !== undefined && value !== '')); if (!Object.keys(values).length) throw new HttpError(400, 'At least one valid field is required'); const { data, error } = await table(d.name).insert(values).select().single(); fail(error); return data; }
+export async function updateAdminRow(name: string, key: string, body: Body) { const d = definition(name); const keys = d.columns.filter(c => c.pk > 0); const values = Object.fromEntries(Object.entries(body ?? {}).filter(([n, v]) => !keys.some(k => k.name === n) && d.columns.some(c => c.name === n) && v !== undefined)); if (!Object.keys(values).length) throw new HttpError(400, 'At least one editable field is required'); let q = table(d.name).update(values); const kv = keyValues(key, keys); for (const k of keys) q = q.eq(k.name, kv[k.name]); const { data, error } = await q.select().single(); fail(error); return data; }
+export async function deleteAdminRow(name: string, key: string) { const d = definition(name); const keys = d.columns.filter(c => c.pk > 0); let q = table(d.name).delete(); const kv = keyValues(key, keys); for (const k of keys) q = q.eq(k.name, kv[k.name]); const { error } = await q; fail(error); return { deleted: true }; }
+
+async function getOrder(id: number): Promise<Order | null> {
+  const { data: row, error } = await table('cutting_orders').select('*, recipes(name,recipe_code,std_fabric_yards,wastage_cap), profiles!cutting_orders_created_by_fkey(full_name)').eq('id', id).maybeSingle();
+  fail(error); if (!row) return null;
+  const recipe = row.recipes as { name: string; recipe_code: string; std_fabric_yards: number; wastage_cap: number };
+  const { data: components, error: componentError } = await table('recipe_components').select('id,component_name,pieces_per_garment,verification_items(actual_qty)').eq('recipe_id', row.recipe_id).eq('verification_items.order_id', id);
+  fail(componentError);
+  const mapped = (components ?? []).map((c: Record<string, unknown>) => { const item = (c.verification_items as { actual_qty: number }[] | null)?.[0]; const expected = Number(c.pieces_per_garment) * Number(row.target_qty); return { component_id: Number(c.id), component_name: String(c.component_name), pieces_per_garment: Number(c.pieces_per_garment), expected_qty: expected, actual_qty: item?.actual_qty ?? null, status: item ? flag(item.actual_qty, expected) : null }; });
+  const { data: logs, error: logError } = await table('verification_logs').select('decision,rejection_note,wastage_pct,timestamp,profiles!verification_logs_verifier_id_fkey(full_name)').eq('order_id', id).order('id', { ascending: false }).limit(1);
+  fail(logError);
+  const log = logs?.[0] as (Log & { profiles?: { full_name: string } }) | undefined;
+  return { ...row, recipe_name: recipe.name, recipe_code: recipe.recipe_code, std_fabric_yards: recipe.std_fabric_yards, wastage_cap: recipe.wastage_cap, created_by_name: (row.profiles as { full_name: string })?.full_name ?? '', expected_fabric: +(Number(row.target_qty) * Number(recipe.std_fabric_yards)).toFixed(2), components: mapped, last_log: log ? { decision: log.decision, rejection_note: log.rejection_note, wastage_pct: log.wastage_pct, timestamp: log.timestamp, verifier_name: log.profiles?.full_name ?? '' } : null } as Order;
 }
 const wastage = (o: Order) => +(((o.actual_fabric_yds - o.expected_fabric) / o.expected_fabric) * 100).toFixed(2);
-
-export function listRecipes(db: DB, u: User | null): Recipe[] {
-  requireRole(u, 'cutting_supervisor', 'cutting_verifier');
-  const rs = db.prepare('SELECT id,recipe_code,name,std_fabric_yards,wastage_cap FROM recipes').all() as Recipe[];
-  for (const r of rs) r.components = db.prepare('SELECT id,component_name,pieces_per_garment FROM recipe_components WHERE recipe_id=?').all(r.id) as Recipe['components'];
-  return rs;
-}
-export function createOrder(db: DB, u: User | null, body: Body): Order {
-  const user = requireRole(u, 'cutting_supervisor');
-  const { recipe_id, target_qty, fabric_roll_id, actual_fabric_yds } = body ?? {};
-  const f: Record<string, string> = {};
-  if (!Number.isInteger(recipe_id) || !db.prepare('SELECT 1 FROM recipes WHERE id=?').get(recipe_id as number)) f.recipe_id = 'Choose a valid recipe';
-  if (!Number.isInteger(target_qty) || (target_qty as number) <= 0 || (target_qty as number) > 100000) f.target_qty = 'Whole number greater than 0 required';
-  if (typeof fabric_roll_id !== 'string' || !/^[A-Za-z0-9-]{3,40}$/.test(fabric_roll_id.trim())) f.fabric_roll_id = 'Letters, digits and dashes only (e.g. FAB-ROLL-882)';
-  if (typeof actual_fabric_yds !== 'number' || !isFinite(actual_fabric_yds) || actual_fabric_yds <= 0) f.actual_fabric_yds = 'Positive number of yards required';
-  if (Object.keys(f).length) throw new HttpError(400, 'Validation failed', { fields: f });
-  const id = db.transaction(() => {
-    const id = Number(db.prepare('INSERT INTO cutting_orders(recipe_id,target_qty,fabric_roll_id,actual_fabric_yds,status,created_by) VALUES(?,?,?,?,?,?)')
-      .run(recipe_id, target_qty, (fabric_roll_id as string).trim(), actual_fabric_yds, 'PENDING_VERIFICATION', user.id).lastInsertRowid);
-    db.prepare('UPDATE cutting_orders SET order_no=? WHERE id=?').run('CUT-' + String(id).padStart(4, '0'), id);
-    return id;
-  })();
-  return getOrder(db, id)!;
-}
-export function listOrders(db: DB, u: User | null): Order[] {
-  const user = requireRole(u, 'cutting_supervisor', 'cutting_verifier');
-  const where = user.role === 'cutting_verifier' ? "WHERE status='PENDING_VERIFICATION'" : '';
-  return (db.prepare(`SELECT id FROM cutting_orders ${where} ORDER BY id DESC`).all() as { id: number }[]).map(r => getOrder(db, r.id)!);
-}
-export function getOrderFor(db: DB, u: User | null, id: number): Order {
-  const user = requireRole(u, 'cutting_supervisor', 'cutting_verifier');
-  const o = getOrder(db, id);
-  if (!o || (user.role === 'cutting_verifier' && o.status !== 'PENDING_VERIFICATION')) throw new HttpError(404, 'Order not found');
-  return o;
-}
-export function resubmit(db: DB, u: User | null, id: number): Order {
-  requireRole(u, 'cutting_supervisor');
-  const o = getOrder(db, id);
-  if (!o) throw new HttpError(404, 'Order not found');
-  if (o.status !== 'REJECTED') throw new HttpError(409, 'Only REJECTED orders can be resubmitted');
-  db.transaction(() => {
-    db.prepare('DELETE FROM verification_items WHERE order_id=?').run(id);
-    db.prepare("UPDATE cutting_orders SET status='PENDING_VERIFICATION',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='REJECTED'").run(id);
-  })();
-  return getOrder(db, id)!;
-}
-
-function pendingOrder(db: DB, id: number): Order {
-  const o = getOrder(db, id);
-  if (!o) throw new HttpError(404, 'Order not found');
-  if (o.status !== 'PENDING_VERIFICATION') throw new HttpError(409, `Order is ${o.status}, not PENDING_VERIFICATION`);
-  return o;
-}
-export function saveCounts(db: DB, u: User | null, id: number, body: Body): Order {
-  requireRole(u, 'cutting_verifier');
-  const o = pendingOrder(db, id), counts = body?.counts;
-  if (!counts || typeof counts !== 'object' || Array.isArray(counts) || !Object.keys(counts).length) throw new HttpError(400, 'counts payload required');
-  const byId = new Map(o.components.map(c => [String(c.component_id), c])), f: Record<string, string> = {};
-  for (const [k, v] of Object.entries(counts as Record<string, unknown>)) {
-    if (!byId.has(k)) f[k] = 'Unknown component';
-    else if (!Number.isInteger(v) || (v as number) < 0) f[k] = 'Whole number 0 or greater required';
-  }
-  if (Object.keys(f).length) throw new HttpError(400, 'Invalid counts', { fields: f });
-  db.transaction(() => {
-    for (const [k, v] of Object.entries(counts as Record<string, number>)) {
-      const c = byId.get(k)!;
-      db.prepare(`INSERT INTO verification_items(order_id,component_id,expected_qty,actual_qty,status) VALUES(?,?,?,?,?)
-        ON CONFLICT(order_id,component_id) DO UPDATE SET actual_qty=excluded.actual_qty,status=excluded.status,expected_qty=excluded.expected_qty`).run(id, c.component_id, c.expected_qty, v, flag(v, c.expected_qty));
-    }
-  })();
-  return getOrder(db, id)!;
-}
-export function approve(db: DB, u: User | null, id: number): Order {
-  const user = requireRole(u, 'cutting_verifier');
-  const o = pendingOrder(db, id);
-  // Hard stop: recomputed from stored counts on the server; client-side state is never trusted.
-  const blocked = o.components.filter(c => c.actual_qty == null || c.actual_qty < c.expected_qty).map(c => c.component_name);
-  if (blocked.length) throw new HttpError(422, 'Hard stop: shortage or uncounted components block approval', { blocked });
-  const variances = JSON.stringify(o.components.map(c => ({ component: c.component_name, expected: c.expected_qty, actual: c.actual_qty, variance: (c.actual_qty ?? 0) - c.expected_qty })));
-  const ok = db.transaction(() => {
-    const r = db.prepare("UPDATE cutting_orders SET status='VERIFIED',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='PENDING_VERIFICATION'").run(id);
-    if (!r.changes) return false;
-    db.prepare("INSERT INTO verification_logs(order_id,verifier_id,decision,wastage_pct,variances,timestamp) VALUES(?,?,'APPROVED',?,?,?)").run(id, user.id, wastage(o), variances, new Date().toISOString());
-    return true;
-  })();
-  if (!ok) throw new HttpError(409, 'Order state changed');
-  return getOrder(db, id)!;
-}
-export function reject(db: DB, u: User | null, id: number, body: Body): Order {
-  const user = requireRole(u, 'cutting_verifier');
-  const o = pendingOrder(db, id);
-  const note = typeof body?.note === 'string' ? body.note.trim() : '';
-  if (note.length < 5) throw new HttpError(422, 'A rejection reason (min 5 characters) is mandatory', { fields: { note: 'Reason required' } });
-  db.transaction(() => {
-    db.prepare("UPDATE cutting_orders SET status='REJECTED',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='PENDING_VERIFICATION'").run(id);
-    db.prepare("INSERT INTO verification_logs(order_id,verifier_id,decision,rejection_note,wastage_pct,timestamp) VALUES(?,?,'REJECTED',?,?,?)").run(id, user.id, note, wastage(o), new Date().toISOString());
-  })();
-  return getOrder(db, id)!;
-}
-// Query isolation: status filter is hard-coded in SQL, no caller input can widen it.
-export function sewingQueue(db: DB, u: User | null): Order[] {
-  requireRole(u, 'sewing_supervisor');
-  return (db.prepare("SELECT id FROM cutting_orders WHERE status = 'VERIFIED' ORDER BY updated_at DESC").all() as { id: number }[]).map(r => getOrder(db, r.id)!);
-}
-export function startSewing(db: DB, u: User | null, id: number): Order {
-  const user = requireRole(u, 'sewing_supervisor');
-  const r = db.prepare("UPDATE cutting_orders SET sewing_started_at=?,sewing_started_by=? WHERE id=? AND status='VERIFIED' AND sewing_started_at IS NULL").run(new Date().toISOString(), user.id, id);
-  if (!r.changes) throw new HttpError(409, 'Order not in queue or already started');
-  return getOrder(db, id)!;
-}
+export async function listRecipes(u: User | null): Promise<Recipe[]> { requireRole(u, 'cutting_supervisor', 'cutting_verifier'); const { data, error } = await table('recipes').select('id,recipe_code,name,std_fabric_yards,wastage_cap,recipe_components(id,component_name,pieces_per_garment)'); fail(error); return (data ?? []).map((r: Record<string, unknown>) => ({ ...r, components: r.recipe_components ?? [] })) as Recipe[]; }
+export async function createOrder(u: User | null, body: Body): Promise<Order> { const user = requireRole(u, 'cutting_supervisor'); const { recipe_id, target_qty, fabric_roll_id, actual_fabric_yds } = body ?? {}; const f: Record<string, string> = {}; const { data: recipe, error } = await table('recipes').select('id').eq('id', recipe_id as number).maybeSingle(); fail(error); if (!Number.isInteger(recipe_id) || !recipe) f.recipe_id = 'Choose a valid recipe'; if (!Number.isInteger(target_qty) || Number(target_qty) <= 0 || Number(target_qty) > 100000) f.target_qty = 'Whole number greater than 0 required'; if (typeof fabric_roll_id !== 'string' || !/^[A-Za-z0-9-]{3,40}$/.test(fabric_roll_id.trim())) f.fabric_roll_id = 'Letters, digits and dashes only'; if (typeof actual_fabric_yds !== 'number' || !Number.isFinite(actual_fabric_yds) || actual_fabric_yds <= 0) f.actual_fabric_yds = 'Positive number of yards required'; if (Object.keys(f).length) throw new HttpError(400, 'Validation failed', { fields: f }); const { data: created, error: insertError } = await table('cutting_orders').insert({ recipe_id, target_qty, fabric_roll_id: (fabric_roll_id as string).trim(), actual_fabric_yds, status: 'PENDING_VERIFICATION', created_by: user.id }).select('id').single(); fail(insertError); if (!created) throw new HttpError(500, 'Supabase did not return the created order'); const { error: orderError } = await table('cutting_orders').update({ order_no: `CUT-${String(created.id).padStart(4, '0')}` }).eq('id', created.id); fail(orderError); return (await getOrder(Number(created.id)))!; }
+export async function listOrders(u: User | null): Promise<Order[]> { const user = requireRole(u, 'cutting_supervisor', 'cutting_verifier'); let q = table('cutting_orders').select('id').order('id', { ascending: false }); if (user.role === 'cutting_verifier') q = q.eq('status', 'PENDING_VERIFICATION'); const { data, error } = await q; fail(error); return Promise.all((data ?? []).map((r: { id: number }) => getOrder(r.id))).then(rows => rows.filter((r): r is Order => !!r)); }
+export async function getOrderFor(u: User | null, id: number) { const user = requireRole(u, 'cutting_supervisor', 'cutting_verifier'); const o = await getOrder(id); if (!o || (user.role === 'cutting_verifier' && o.status !== 'PENDING_VERIFICATION')) throw new HttpError(404, 'Order not found'); return o; }
+async function pendingOrder(id: number) { const o = await getOrder(id); if (!o) throw new HttpError(404, 'Order not found'); if (o.status !== 'PENDING_VERIFICATION') throw new HttpError(409, `Order is ${o.status}, not PENDING_VERIFICATION`); return o; }
+export async function resubmit(u: User | null, id: number) { requireRole(u, 'cutting_supervisor'); const o = await getOrder(id); if (!o) throw new HttpError(404, 'Order not found'); if (o.status !== 'REJECTED') throw new HttpError(409, 'Only REJECTED orders can be resubmitted'); const { error: deleteError } = await table('verification_items').delete().eq('order_id', id); fail(deleteError); const { error } = await table('cutting_orders').update({ status: 'PENDING_VERIFICATION', updated_at: new Date().toISOString() }).eq('id', id); fail(error); return (await getOrder(id))!; }
+export async function saveCounts(u: User | null, id: number, body: Body) { requireRole(u, 'cutting_verifier'); const o = await pendingOrder(id); const counts = body?.counts; if (!counts || typeof counts !== 'object' || Array.isArray(counts) || !Object.keys(counts).length) throw new HttpError(400, 'counts payload required'); const byId = new Map(o.components.map(c => [String(c.component_id), c])); const rows = Object.entries(counts as Record<string, unknown>).map(([k, v]) => { const c = byId.get(k); if (!c) throw new HttpError(400, 'Invalid component'); if (!Number.isInteger(v) || Number(v) < 0) throw new HttpError(400, 'Counts must be whole numbers'); return { order_id: id, component_id: c.component_id, expected_qty: c.expected_qty, actual_qty: Number(v), status: flag(Number(v), c.expected_qty) }; }); const { error } = await table('verification_items').upsert(rows, { onConflict: 'order_id,component_id' }); fail(error); return (await getOrder(id))!; }
+export async function approve(u: User | null, id: number) { const user = requireRole(u, 'cutting_verifier'); const o = await pendingOrder(id); const blocked = o.components.filter(c => c.actual_qty == null || c.actual_qty < c.expected_qty).map(c => c.component_name); if (blocked.length) throw new HttpError(422, 'Hard stop: shortage or uncounted components block approval', { blocked }); const { error } = await table('cutting_orders').update({ status: 'VERIFIED', updated_at: new Date().toISOString() }).eq('id', id).eq('status', 'PENDING_VERIFICATION'); fail(error); const { error: logError } = await table('verification_logs').insert({ order_id: id, verifier_id: user.id, decision: 'APPROVED', wastage_pct: wastage(o), variances: o.components.map(c => ({ component: c.component_name, expected: c.expected_qty, actual: c.actual_qty, variance: (c.actual_qty ?? 0) - c.expected_qty })) }); fail(logError); return (await getOrder(id))!; }
+export async function reject(u: User | null, id: number, body: Body) { const user = requireRole(u, 'cutting_verifier'); const o = await pendingOrder(id); const note = typeof body?.note === 'string' ? body.note.trim() : ''; if (note.length < 5) throw new HttpError(422, 'A rejection reason (min 5 characters) is mandatory', { fields: { note: 'Reason required' } }); const { error } = await table('cutting_orders').update({ status: 'REJECTED', updated_at: new Date().toISOString() }).eq('id', id).eq('status', 'PENDING_VERIFICATION'); fail(error); const { error: logError } = await table('verification_logs').insert({ order_id: id, verifier_id: user.id, decision: 'REJECTED', rejection_note: note, wastage_pct: wastage(o) }); fail(logError); return (await getOrder(id))!; }
+export async function sewingQueue(u: User | null) { requireRole(u, 'sewing_supervisor'); const { data, error } = await table('cutting_orders').select('id').eq('status', 'VERIFIED').order('updated_at', { ascending: false }); fail(error); return Promise.all((data ?? []).map((r: { id: number }) => getOrder(r.id))).then(rows => rows.filter((r): r is Order => !!r)); }
+export async function startSewing(u: User | null, id: number) { const user = requireRole(u, 'sewing_supervisor'); const { data, error } = await table('cutting_orders').update({ sewing_started_at: new Date().toISOString(), sewing_started_by: user.id }).eq('id', id).eq('status', 'VERIFIED').is('sewing_started_at', null).select('id').maybeSingle(); fail(error); if (!data) throw new HttpError(409, 'Order not in queue or already started'); return (await getOrder(id))!; }
