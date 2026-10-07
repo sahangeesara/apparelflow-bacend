@@ -78,6 +78,30 @@ create index if not exists idx_items_order     on verification_items(order_id);
 create index if not exists idx_logs_order      on verification_logs(order_id);
 create index if not exists idx_sessions_user   on sessions(user_id);
 
+-- ============ VERIFICATION WORKFLOW COMPATIBILITY ============
+-- Supabase Auth IDs are UUIDs. Older dashboard-created tables sometimes have
+-- verifier_id as bigint, which cannot store auth.uid() and blocks log inserts.
+do $$
+declare verifier_type text;
+begin
+  select data_type into verifier_type
+  from information_schema.columns
+  where table_schema = 'public'
+    and table_name = 'verification_logs'
+    and column_name = 'verifier_id';
+
+  if verifier_type is not null and verifier_type <> 'uuid' then
+    if exists (select 1 from public.verification_logs) then
+      raise exception 'verification_logs.verifier_id must be changed to uuid after backing up existing rows';
+    end if;
+    alter table public.verification_logs
+      alter column verifier_id type uuid using null::uuid;
+  end if;
+end $$;
+
+create unique index if not exists verification_items_order_component_uidx
+  on verification_items(order_id, component_id);
+
 -- ============ IMMUTABLE AUDIT LOG ============
 create or replace function forbid_log_changes() returns trigger language plpgsql as $$
 begin
