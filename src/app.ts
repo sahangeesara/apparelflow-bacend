@@ -81,6 +81,8 @@ export function createApp() {
   app.get('/api/orders/:id', route(async req => ({ order: await svc.getOrderFor(user(req), id(req)) })));
   app.post('/api/orders/:id/resubmit', route(async req => ({ order: await svc.resubmit(user(req), id(req)) })));
   app.post('/api/orders/:id/counts', route(async req => ({ order: await svc.saveCounts(user(req), id(req), req.body) })));
+  app.post('/api/orders/:id/verification', route(async req => ({ order: await svc.saveCounts(user(req), id(req), req.body) })));
+  app.post('/api/orders/:id/submit-verification', route(async req => ({ order: await svc.saveCounts(user(req), id(req), req.body) })));
   app.post('/api/orders/:id/approve', route(async req => ({ order: await svc.approve(user(req), id(req)) })));
   app.post('/api/orders/:id/reject', route(async req => ({ order: await svc.reject(user(req), id(req), req.body) })));
 

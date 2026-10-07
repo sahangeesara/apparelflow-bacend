@@ -126,7 +126,34 @@ export async function listOrders(u: User | null): Promise<Order[]> { const user 
 export async function getOrderFor(u: User | null, id: number) { const user = requireRole(u, 'cutting_supervisor', 'cutting_verifier'); const o = await getOrder(id); if (!o || (user.role === 'cutting_verifier' && o.status !== 'PENDING_VERIFICATION')) throw new HttpError(404, 'Order not found'); return o; }
 async function pendingOrder(id: number) { const o = await getOrder(id); if (!o) throw new HttpError(404, 'Order not found'); if (o.status !== 'PENDING_VERIFICATION') throw new HttpError(409, `Order is ${o.status}, not PENDING_VERIFICATION`); return o; }
 export async function resubmit(u: User | null, id: number) { requireRole(u, 'cutting_supervisor'); const o = await getOrder(id); if (!o) throw new HttpError(404, 'Order not found'); if (o.status !== 'REJECTED') throw new HttpError(409, 'Only REJECTED orders can be resubmitted'); const { error: deleteError } = await table('verification_items').delete().eq('order_id', id); fail(deleteError); const { error } = await table('cutting_orders').update({ status: 'PENDING_VERIFICATION', updated_at: new Date().toISOString() }).eq('id', id); fail(error); return (await getOrder(id))!; }
-export async function saveCounts(u: User | null, id: number, body: Body) { requireRole(u, 'cutting_verifier'); const o = await pendingOrder(id); const counts = body?.counts; if (!counts || typeof counts !== 'object' || Array.isArray(counts) || !Object.keys(counts).length) throw new HttpError(400, 'counts payload required'); const byId = new Map(o.components.map(c => [String(c.component_id), c])); const rows = Object.entries(counts as Record<string, unknown>).map(([k, v]) => { const c = byId.get(k); if (!c) throw new HttpError(400, 'Invalid component'); if (!Number.isInteger(v) || Number(v) < 0) throw new HttpError(400, 'Counts must be whole numbers'); return { order_id: id, component_id: c.component_id, expected_qty: c.expected_qty, actual_qty: Number(v), status: flag(Number(v), c.expected_qty) }; }); const { error } = await table('verification_items').upsert(rows, { onConflict: 'order_id,component_id' }); fail(error); return (await getOrder(id))!; }
+export async function saveCounts(u: User | null, id: number, body: Body) {
+  requireRole(u, 'cutting_verifier');
+  const o = await pendingOrder(id);
+  const payload = body ?? {};
+  const rawCounts = payload.counts ?? payload.items ?? payload.verification_items;
+  const counts = Array.isArray(rawCounts)
+    ? Object.fromEntries(rawCounts.map(item => {
+      if (!item || typeof item !== 'object') throw new HttpError(400, 'Invalid verification item');
+      const value = item as Record<string, unknown>;
+      const componentId = value.component_id ?? value.componentId ?? value.id;
+      const actualQty = value.actual_qty ?? value.actualQty ?? value.count;
+      return [String(componentId), actualQty];
+    }))
+    : rawCounts;
+  if (!counts || typeof counts !== 'object' || Array.isArray(counts) || !Object.keys(counts).length) {
+    throw new HttpError(400, 'counts payload required');
+  }
+  const byId = new Map(o.components.map(c => [String(c.component_id), c]));
+  const rows = Object.entries(counts as Record<string, unknown>).map(([key, value]) => {
+    const c = byId.get(key);
+    if (!c) throw new HttpError(400, 'Invalid component');
+    if (!Number.isInteger(value) || Number(value) < 0) throw new HttpError(400, 'Counts must be whole numbers');
+    return { order_id: id, component_id: c.component_id, expected_qty: c.expected_qty, actual_qty: Number(value), status: flag(Number(value), c.expected_qty) };
+  });
+  const { error } = await table('verification_items').upsert(rows, { onConflict: 'order_id,component_id' });
+  fail(error);
+  return (await getOrder(id))!;
+}
 export async function approve(u: User | null, id: number) { const user = requireRole(u, 'cutting_verifier'); const o = await pendingOrder(id); const blocked = o.components.filter(c => c.actual_qty == null || c.actual_qty < c.expected_qty).map(c => c.component_name); if (blocked.length) throw new HttpError(422, 'Hard stop: shortage or uncounted components block approval', { blocked }); const { error } = await table('cutting_orders').update({ status: 'VERIFIED', updated_at: new Date().toISOString() }).eq('id', id).eq('status', 'PENDING_VERIFICATION'); fail(error); const { error: logError } = await table('verification_logs').insert({ order_id: id, verifier_id: user.id, decision: 'APPROVED', wastage_pct: wastage(o), variances: o.components.map(c => ({ component: c.component_name, expected: c.expected_qty, actual: c.actual_qty, variance: (c.actual_qty ?? 0) - c.expected_qty })) }); fail(logError); return (await getOrder(id))!; }
 export async function reject(u: User | null, id: number, body: Body) { const user = requireRole(u, 'cutting_verifier'); const o = await pendingOrder(id); const note = typeof body?.note === 'string' ? body.note.trim() : ''; if (note.length < 5) throw new HttpError(422, 'A rejection reason (min 5 characters) is mandatory', { fields: { note: 'Reason required' } }); const { error } = await table('cutting_orders').update({ status: 'REJECTED', updated_at: new Date().toISOString() }).eq('id', id).eq('status', 'PENDING_VERIFICATION'); fail(error); const { error: logError } = await table('verification_logs').insert({ order_id: id, verifier_id: user.id, decision: 'REJECTED', rejection_note: note, wastage_pct: wastage(o) }); fail(logError); return (await getOrder(id))!; }
 export async function sewingQueue(u: User | null) { requireRole(u, 'sewing_supervisor'); const { data, error } = await table('cutting_orders').select('id').eq('status', 'VERIFIED').order('updated_at', { ascending: false }); fail(error); return Promise.all((data ?? []).map((r: { id: number }) => getOrder(r.id))).then(rows => rows.filter((r): r is Order => !!r)); }
