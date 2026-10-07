@@ -111,11 +111,17 @@ begin
     and column_name = 'sewing_started_by';
 
   if sewing_type is not null and sewing_type <> 'uuid' then
-    if exists (
-      select 1 from public.cutting_orders where sewing_started_by is not null
-    ) then
-      raise exception 'cutting_orders.sewing_started_by has existing values; backup and migrate those rows first';
-    end if;
+    create table if not exists public.legacy_sewing_started_by (
+      order_id bigint primary key,
+      legacy_sewing_started_by text not null,
+      backed_up_at timestamptz not null default now()
+    );
+    insert into public.legacy_sewing_started_by (order_id, legacy_sewing_started_by)
+    select id, sewing_started_by::text
+    from public.cutting_orders
+    where sewing_started_by is not null
+    on conflict (order_id) do nothing;
+
     alter table public.cutting_orders
       alter column sewing_started_by type uuid using null::uuid;
   end if;
