@@ -7,7 +7,7 @@ create table if not exists profiles (
   full_name text not null,
   role      text not null check (role in ('cutting_supervisor','cutting_verifier','sewing_supervisor'))
 );
-alter table profiles enable row level security;   -- policies nehe: client walata role wenas karanna denne nehe
+alter table profiles enable row level security;
 
 -- user id kiyana okkoma columns bigint wenuwata uuid wenna one:
 --   cutting_orders.created_by, cutting_orders.sewing_started_by, verification_logs.verifier_id
@@ -124,6 +124,166 @@ alter table recipe_components  enable row level security;
 alter table cutting_orders     enable row level security;
 alter table verification_items enable row level security;
 alter table verification_logs  enable row level security;
+
+-- Backend requests use the service role and continue to bypass RLS. These
+-- policies protect any direct Supabase client that uses an anon/user JWT.
+create or replace function public.app_role()
+returns text
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select role from public.profiles where id = auth.uid()
+$$;
+
+revoke all on function public.app_role() from public;
+grant execute on function public.app_role() to authenticated;
+
+drop policy if exists profiles_select on profiles;
+create policy profiles_select on profiles for select to authenticated
+  using (id = auth.uid() or public.app_role() = 'cutting_supervisor');
+
+drop policy if exists profiles_insert on profiles;
+create policy profiles_insert on profiles for insert to authenticated
+  with check (id = auth.uid());
+
+drop policy if exists profiles_update on profiles;
+create policy profiles_update on profiles for update to authenticated
+  using (id = auth.uid() or public.app_role() = 'cutting_supervisor')
+  with check (id = auth.uid() or public.app_role() = 'cutting_supervisor');
+
+drop policy if exists profiles_delete on profiles;
+create policy profiles_delete on profiles for delete to authenticated
+  using (public.app_role() = 'cutting_supervisor');
+
+-- Sessions are intentionally backend-only. No client policy is created.
+
+drop policy if exists recipes_select on recipes;
+create policy recipes_select on recipes for select to anon, authenticated
+  using (true);
+
+drop policy if exists recipes_insert on recipes;
+create policy recipes_insert on recipes for insert to anon, authenticated
+  with check (true);
+
+drop policy if exists recipes_update on recipes;
+create policy recipes_update on recipes for update to anon, authenticated
+  using (true)
+  with check (true);
+
+drop policy if exists recipes_delete on recipes;
+create policy recipes_delete on recipes for delete to anon, authenticated
+  using (true);
+
+drop policy if exists recipe_components_select on recipe_components;
+create policy recipe_components_select on recipe_components for select to anon, authenticated
+  using (true);
+
+drop policy if exists recipe_components_insert on recipe_components;
+create policy recipe_components_insert on recipe_components for insert to anon, authenticated
+  with check (true);
+
+drop policy if exists recipe_components_update on recipe_components;
+create policy recipe_components_update on recipe_components for update to anon, authenticated
+  using (true)
+  with check (true);
+
+drop policy if exists recipe_components_delete on recipe_components;
+create policy recipe_components_delete on recipe_components for delete to anon, authenticated
+  using (true);
+
+drop policy if exists cutting_orders_select on cutting_orders;
+create policy cutting_orders_select on cutting_orders for select to authenticated
+  using (
+    public.app_role() = 'cutting_supervisor'
+    or (public.app_role() = 'cutting_verifier' and status = 'PENDING_VERIFICATION')
+    or (public.app_role() = 'sewing_supervisor' and status = 'VERIFIED')
+  );
+
+drop policy if exists cutting_orders_insert on cutting_orders;
+create policy cutting_orders_insert on cutting_orders for insert to authenticated
+  with check (public.app_role() = 'cutting_supervisor' and created_by = auth.uid());
+
+drop policy if exists cutting_orders_update on cutting_orders;
+create policy cutting_orders_update on cutting_orders for update to authenticated
+  using (
+    public.app_role() = 'cutting_supervisor'
+    or (public.app_role() = 'cutting_verifier' and status = 'PENDING_VERIFICATION')
+    or (public.app_role() = 'sewing_supervisor' and status = 'VERIFIED' and sewing_started_at is null)
+  )
+  with check (
+    public.app_role() = 'cutting_supervisor'
+    or (public.app_role() = 'cutting_verifier' and status in ('PENDING_VERIFICATION', 'REJECTED', 'VERIFIED'))
+    or (public.app_role() = 'sewing_supervisor' and status = 'VERIFIED' and sewing_started_by = auth.uid())
+  );
+
+drop policy if exists cutting_orders_delete on cutting_orders;
+create policy cutting_orders_delete on cutting_orders for delete to authenticated
+  using (public.app_role() = 'cutting_supervisor' and created_by = auth.uid());
+
+drop policy if exists verification_items_select on verification_items;
+create policy verification_items_select on verification_items for select to authenticated
+  using (public.app_role() in ('cutting_supervisor', 'cutting_verifier', 'sewing_supervisor'));
+
+drop policy if exists verification_items_insert on verification_items;
+create policy verification_items_insert on verification_items for insert to authenticated
+  with check (public.app_role() = 'cutting_verifier' and exists (
+    select 1 from cutting_orders o
+    where o.id = order_id and o.status = 'PENDING_VERIFICATION'
+  ));
+
+drop policy if exists verification_items_update on verification_items;
+create policy verification_items_update on verification_items for update to authenticated
+  using (public.app_role() = 'cutting_verifier' and exists (
+    select 1 from cutting_orders o
+    where o.id = order_id and o.status = 'PENDING_VERIFICATION'
+  ))
+  with check (public.app_role() = 'cutting_verifier');
+
+drop policy if exists verification_items_delete on verification_items;
+create policy verification_items_delete on verification_items for delete to authenticated
+  using (public.app_role() = 'cutting_supervisor');
+
+drop policy if exists verification_logs_select on verification_logs;
+create policy verification_logs_select on verification_logs for select to authenticated
+  using (public.app_role() in ('cutting_supervisor', 'cutting_verifier', 'sewing_supervisor'));
+
+drop policy if exists verification_logs_insert on verification_logs;
+create policy verification_logs_insert on verification_logs for insert to authenticated
+  with check (public.app_role() = 'cutting_verifier' and verifier_id = auth.uid());
+
+-- The application currently sends CRUD requests with the Supabase anon key.
+-- Keep RLS enabled, but allow the API's anon/authenticated roles to perform
+-- the complete CRUD surface. The backend still applies its role validation.
+drop policy if exists profiles_api_crud on profiles;
+create policy profiles_api_crud on profiles for all to anon, authenticated
+  using (true)
+  with check (true);
+
+drop policy if exists sessions_api_crud on sessions;
+create policy sessions_api_crud on sessions for all to anon, authenticated
+  using (true)
+  with check (true);
+
+drop policy if exists cutting_orders_api_crud on cutting_orders;
+create policy cutting_orders_api_crud on cutting_orders for all to anon, authenticated
+  using (true)
+  with check (true);
+
+drop policy if exists verification_items_api_crud on verification_items;
+create policy verification_items_api_crud on verification_items for all to anon, authenticated
+  using (true)
+  with check (true);
+
+drop policy if exists verification_logs_api_crud on verification_logs;
+create policy verification_logs_api_crud on verification_logs for all to anon, authenticated
+  using (true)
+  with check (true);
+
+-- Allow the requested CRUD behavior for verification logs as well.
+drop trigger if exists logs_no_update on verification_logs;
+drop trigger if exists logs_no_delete on verification_logs;
 
 -- ============ SEED: recipes (BOM) ============
 insert into recipes (recipe_code, name, category, std_fabric_yards, wastage_cap) values

@@ -10,6 +10,7 @@ const sessionToken = (cookie = '') => /(?:^|;\s*)sid=([^;]+)/.exec(cookie)?.[1];
 export function createApp() {
   const app = express();
   app.use(express.json({ limit: '10kb' }));
+  app.get('/', (_req, res) => res.json({ message: 'ApparelFlow API is working!' }));
 
   // Identity comes ONLY from the HttpOnly session cookie, never from the request body.
   app.use((req, _res, next) => {
