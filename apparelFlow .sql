@@ -99,6 +99,28 @@ begin
   end if;
 end $$;
 
+-- Older dashboard-created cutting_orders tables may have this user column as
+-- bigint. Supabase Auth user IDs are UUIDs, so convert it before sewing starts.
+do $$
+declare sewing_type text;
+begin
+  select data_type into sewing_type
+  from information_schema.columns
+  where table_schema = 'public'
+    and table_name = 'cutting_orders'
+    and column_name = 'sewing_started_by';
+
+  if sewing_type is not null and sewing_type <> 'uuid' then
+    if exists (
+      select 1 from public.cutting_orders where sewing_started_by is not null
+    ) then
+      raise exception 'cutting_orders.sewing_started_by has existing values; backup and migrate those rows first';
+    end if;
+    alter table public.cutting_orders
+      alter column sewing_started_by type uuid using null::uuid;
+  end if;
+end $$;
+
 create unique index if not exists verification_items_order_component_uidx
   on verification_items(order_id, component_id);
 
