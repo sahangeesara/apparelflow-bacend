@@ -9,6 +9,25 @@ const sessionToken = (cookie = '') => /(?:^|;\s*)sid=([^;]+)/.exec(cookie)?.[1];
 
 export function createApp() {
   const app = express();
+  const allowedOrigins = new Set(
+    (process.env.FRONTEND_ORIGINS ?? process.env.FRONTEND_ORIGIN ?? '')
+      .split(',')
+      .map(origin => origin.trim())
+      .filter(Boolean),
+  );
+
+  app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    if (origin && (allowedOrigins.size === 0 || allowedOrigins.has(origin))) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+      res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS');
+    }
+    if (req.method === 'OPTIONS') return res.sendStatus(204);
+    next();
+  });
   app.use(express.json({ limit: '10kb' }));
   app.get('/', (_req, res) => res.json({ message: 'ApparelFlow API is working!' }));
 
@@ -30,7 +49,13 @@ export function createApp() {
   // ---- auth
   app.post('/api/login', route(async (req, res) => {
     const { token, user } = await svc.login(req.body);
-      res.cookie('sid', token, { httpOnly: true, sameSite: 'strict', path: '/', maxAge: 8 * 3600e3, secure: process.env.NODE_ENV === 'production' });
+      res.cookie('sid', token, {
+        httpOnly: true,
+        sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'strict',
+        path: '/',
+        maxAge: 8 * 3600e3,
+        secure: process.env.NODE_ENV === 'production',
+      });
       return { user };
   }));
   app.post('/api/signup', route((req, res) => svc.signup(req.body), 201));
