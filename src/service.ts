@@ -102,16 +102,22 @@ export async function updateAdminRow(name: string, key: string, body: Body) { co
 export async function deleteAdminRow(name: string, key: string) { const d = definition(name); const keys = d.columns.filter(c => c.pk > 0); let q = table(d.name).delete(); const kv = keyValues(key, keys); for (const k of keys) q = q.eq(k.name, kv[k.name]); const { error } = await q; fail(error); return { deleted: true }; }
 
 async function getOrder(id: number): Promise<Order | null> {
-  const { data: row, error } = await table('cutting_orders').select('*, recipes(name,recipe_code,std_fabric_yards,wastage_cap), profiles!cutting_orders_created_by_fkey(full_name)').eq('id', id).maybeSingle();
+  const { data: row, error } = await table('cutting_orders').select('*, recipes(name,recipe_code,std_fabric_yards,wastage_cap)').eq('id', id).maybeSingle();
   fail(error); if (!row) return null;
   const recipe = row.recipes as { name: string; recipe_code: string; std_fabric_yards: number; wastage_cap: number };
+  const { data: creator, error: creatorError } = await table('profiles').select('full_name').eq('id', row.created_by).maybeSingle();
+  fail(creatorError);
   const { data: components, error: componentError } = await table('recipe_components').select('id,component_name,pieces_per_garment,verification_items(actual_qty)').eq('recipe_id', row.recipe_id).eq('verification_items.order_id', id);
   fail(componentError);
   const mapped = (components ?? []).map((c: Record<string, unknown>) => { const item = (c.verification_items as { actual_qty: number }[] | null)?.[0]; const expected = Number(c.pieces_per_garment) * Number(row.target_qty); return { component_id: Number(c.id), component_name: String(c.component_name), pieces_per_garment: Number(c.pieces_per_garment), expected_qty: expected, actual_qty: item?.actual_qty ?? null, status: item ? flag(item.actual_qty, expected) : null }; });
-  const { data: logs, error: logError } = await table('verification_logs').select('decision,rejection_note,wastage_pct,timestamp,profiles!verification_logs_verifier_id_fkey(full_name)').eq('order_id', id).order('id', { ascending: false }).limit(1);
+  const { data: logs, error: logError } = await table('verification_logs').select('decision,rejection_note,wastage_pct,timestamp,verifier_id').eq('order_id', id).order('id', { ascending: false }).limit(1);
   fail(logError);
-  const log = logs?.[0] as (Log & { profiles?: { full_name: string } }) | undefined;
-  return { ...row, recipe_name: recipe.name, recipe_code: recipe.recipe_code, std_fabric_yards: recipe.std_fabric_yards, wastage_cap: recipe.wastage_cap, created_by_name: (row.profiles as { full_name: string })?.full_name ?? '', expected_fabric: +(Number(row.target_qty) * Number(recipe.std_fabric_yards)).toFixed(2), components: mapped, last_log: log ? { decision: log.decision, rejection_note: log.rejection_note, wastage_pct: log.wastage_pct, timestamp: log.timestamp, verifier_name: log.profiles?.full_name ?? '' } : null } as Order;
+  const log = logs?.[0] as (Log & { verifier_id: string }) | undefined;
+  const { data: verifier, error: verifierError } = log
+    ? await table('profiles').select('full_name').eq('id', log.verifier_id).maybeSingle()
+    : { data: null, error: null };
+  fail(verifierError);
+  return { ...row, recipe_name: recipe.name, recipe_code: recipe.recipe_code, std_fabric_yards: recipe.std_fabric_yards, wastage_cap: recipe.wastage_cap, created_by_name: creator?.full_name ?? '', expected_fabric: +(Number(row.target_qty) * Number(recipe.std_fabric_yards)).toFixed(2), components: mapped, last_log: log ? { decision: log.decision, rejection_note: log.rejection_note, wastage_pct: log.wastage_pct, timestamp: log.timestamp, verifier_name: verifier?.full_name ?? '' } : null } as Order;
 }
 const wastage = (o: Order) => +(((o.actual_fabric_yds - o.expected_fabric) / o.expected_fabric) * 100).toFixed(2);
 export async function listRecipes(u: User | null): Promise<Recipe[]> { requireRole(u, 'cutting_supervisor', 'cutting_verifier'); const { data, error } = await table('recipes').select('id,recipe_code,name,std_fabric_yards,wastage_cap,recipe_components(id,component_name,pieces_per_garment)'); fail(error); return (data ?? []).map((r: Record<string, unknown>) => ({ ...r, components: r.recipe_components ?? [] })) as Recipe[]; }
